@@ -1520,7 +1520,7 @@ BrowseContentDirectory(struct upnphttp * h, const char * action)
 
 			sql = sqlite3_mprintf("SELECT %s, %s, %s, " COLUMNS
 		              "from OBJECTS o left join DETAILS d on (d.ID = o.DETAIL_ID)"
-				      " where (%s and (o.password is null or o.password = '' or o.password in (%s)) %s)  limit %d, %d;",
+				      " where (%s and (o.password is null or o.password = '' or o.password in (%s))) %s  limit %d, %d;",
 				      objectid_sql, parentid_sql, refid_sql,
 				      where, args.password ? args.password : "''", THISORNUL(orderBy), StartingIndex, RequestedCount);
 			DPRINTF(E_DEBUG, L_HTTP, "Browse SQL: %s\n", sql);
