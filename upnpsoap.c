@@ -805,6 +805,7 @@ callback(void *args, int argc, char **argv, char **azColName)
 			}
 			else
 			{
+				// TODO(jdef) possible memory leak (realloc doesn't free original buffer on fail)
 				DPRINTF(E_ERROR, L_HTTP, "UPnP SOAP response was too big, and realloc failed!\n");
 				return -1;
 			}
@@ -1257,36 +1258,63 @@ static void createPasswordContainer(struct Response *passed_args, const char *id
 			for (i++,j=0;i<strlen(id) && j<runtime_vars.password_length;i+=2,j++) {
 				pin[j] = id[i];
 			}
+
 			pin[j] = 0;
+			int lpin = strlen(pin);
+			if ( lpin == 0 ) return; // empty password? abort..
+
+			// Check for all Zero's (0) to clear the password
+			for (i = lpin; i-- > 0;) if (pin[i] != '0') break;
+
+			if ( i == -1 )
+			{
+				// zero-check successful: clear password, and finish
+				DPRINTF(E_INFO, L_HTTP, "Forgetting passwords\n");
+				free(passed_args->password);
+				passed_args->password = NULL;
+				return;
+			}
+
 			//DPRINTF(E_DEBUG, L_HTTP, "Generating Password Pin: %s\n", pin);
 
 			if (passed_args->password == NULL) {
 				cnt = runtime_vars.password_length+3;
 				passed_args->password = malloc(cnt);
-				strcpy(passed_args->password, "'");
-				strcat(passed_args->password, pin);
-				strcat(passed_args->password, "'");
+				if ( passed_args->password )
+				{
+					strcpy(passed_args->password, "'");
+					strcat(passed_args->password, pin);
+					strcat(passed_args->password, "'");
+				} else {
+					DPRINTF(E_ERROR, L_HTTP, "Failed to allocate password buffer of %d bytes\n", cnt);
+				}
 			} else {
+				// check for already pin already present. arguably this could be implemented more efficiently
+				// if we maintained a set of existing pins in a dictionary of sorts vs. a CSV-list. but this
+				// does the job for now.
+				char *token = strtok(passed_args->password, "',");
+				while( token != NULL )
+				{
+					if( strcmp(token, pin) == 0 ) return; // pin already in the list
+					token = strtok(NULL, "',");
+				}
+
 				cnt = strlen(passed_args->password)+runtime_vars.password_length+4;
-				passed_args->password = realloc(passed_args->password, cnt);
-				strcat(passed_args->password, ",'");
-				strcat(passed_args->password, pin);
-				strcat(passed_args->password, "'");
+				void *newbuf = realloc(passed_args->password, cnt);
+				if ( newbuf )
+				{
+					passed_args->password = newbuf;
+					strcat(passed_args->password, ",'");
+					strcat(passed_args->password, pin);
+					strcat(passed_args->password, "'");
+				} else {
+					DPRINTF(E_ERROR, L_HTTP, "Failed to grow password buffer to %d bytes\n", cnt);
+				}
 			}
 			
-			// Check for all Zero's (0) to clear the password
-			for (i=0;i<strlen(pin);i++) {
-			    if (pin[i] != '0') break;
-			}
-			if (i == strlen(pin)) {
-			    free(passed_args->password);
-			    passed_args->password = NULL;
-			}
-
 			//DPRINTF(E_DEBUG, L_HTTP, "Generating Password Stored: %s\n", passed_args->password);
 
 		}
-		cnt = 0;
 		return;
 	}
 
@@ -1435,10 +1463,13 @@ BrowseContentDirectory(struct upnphttp * h, const char * action)
 			DPRINTF(E_INFO, L_HTTP, "Is Password %s", ObjectID);
 			createPasswordContainer(&args, ObjectID, 0);
 			totalMatches = args.returned;
-		        if (h->req_client && args.password) {
-				DPRINTF(E_INFO, L_HTTP, "Passwords %s", args.password);
+		        if (h->req_client) {
+				if (args.password) {
+					DPRINTF(E_INFO, L_HTTP, "Passwords %s", args.password);
+				}
+				// always update client passwords (they may have been cleared); not doing so
+				// risks accessing a free'd memory buffer.
 				h->req_client->password = args.password;
-
 			}
 	    } else {
 			magic = check_magic_container(ObjectID, args.flags);
