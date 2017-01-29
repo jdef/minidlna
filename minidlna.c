@@ -668,6 +668,10 @@ init(int argc, char **argv)
 			if (!strtobool(ary_options[i].value))
 				CLEARFLAG(INOTIFY_MASK);
 			break;
+		case ENABLE_CACHE_METADATA:
+			if (strtobool(ary_options[i].value))
+				SETFLAG(CACHE_METADATA_MASK);
+			break;
 		case ENABLE_TIVO:
 			if (strtobool(ary_options[i].value))
 				SETFLAG(TIVO_MASK);

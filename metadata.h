@@ -100,4 +100,7 @@ GetImageMetadata(const char *path, char *name);
 int64_t
 GetVideoMetadata(const char *path, char *name);
 
+int64_t
+GetVideoMetadataLite(const char *path, char *name);
+
 #endif

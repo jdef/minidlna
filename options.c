@@ -66,7 +66,8 @@ static const struct {
 	{ MAX_CONNECTIONS, "max_connections" },
 	{ MERGE_MEDIA_DIRS, "merge_media_dirs" },
 	{ WIDE_LINKS, "wide_links" },
-	{ PASSWORD_LENGTH, "password_length" }
+	{ PASSWORD_LENGTH, "password_length" },
+	{ ENABLE_CACHE_METADATA, "cache_metadata" }
 };
 
 int

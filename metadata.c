@@ -656,6 +656,85 @@ no_exifdata:
 	return ret;
 }
 
+#define META_LINES 16
+#define META_LINE_SIZE 512
+char meta[META_LINES][META_LINE_SIZE];
+char meta_path[PATH_MAX];
+char path_dup[PATH_MAX];
+char path_dup1[PATH_MAX];
+char buf[META_LINE_SIZE];
+
+void
+checkNull(char* buf)
+{
+	if (buf[strlen(buf)-1] == '\n')
+	{
+	  buf[strlen(buf)-1] = '\0';
+	}
+}
+
+int64_t
+GetVideoMetadataLite(const char *path, char *name)
+{
+	struct stat file;
+	int ret;
+
+	sprintf(path_dup, "%s", path);
+	sprintf(path_dup1, "%s", path);
+	char *dir_end = memrchr(path_dup, '/', strlen(path_dup));
+	*dir_end = '\0';
+	DPRINTF(E_DEBUG, L_METADATA, "Dirpath...[%s]\n", path_dup);
+	sprintf(meta_path, "%s/.meta/%s", path_dup, basename(path_dup1));
+
+	if ( !GETFLAG(CACHE_METADATA_MASK) || stat(meta_path, &file) != 0 )
+	{
+		DPRINTF(E_DEBUG, L_METADATA, "Get actual meta: %s!\n", meta_path);
+		return GetVideoMetadata(path, name);
+	}
+	else
+	{
+		DPRINTF(E_DEBUG, L_METADATA, "Reading metadata file...[%s]\n", meta_path);
+
+		// Reading metadata file
+		FILE *metadata_ex_d = fopen(meta_path, "r");
+		if (metadata_ex_d)
+		{
+			int i;
+			for (i = 0; i < META_LINES; i++)
+			{
+				fgets(meta[i], META_LINE_SIZE, metadata_ex_d);
+				checkNull(meta[i]);
+			}
+
+			fclose(metadata_ex_d);
+
+			long long int pi0 = strtoll(meta[0], NULL, 10);
+			long int pi1 = strtol(meta[1], NULL, 10);
+			long long int pi15 = strtoll(meta[15], NULL, 10);
+
+			ret = sql_exec(db, "INSERT into DETAILS"
+		                   " (PATH, SIZE, TIMESTAMP, DURATION, DATE, CHANNELS, BITRATE, SAMPLERATE, RESOLUTION,"
+		                   "  TITLE, CREATOR, ARTIST, GENRE, COMMENT, DLNA_PN, MIME, ALBUM_ART) "
+		                   "VALUES"
+		                   " (%Q, %lld, %ld, %Q, %Q, %Q, %Q, %Q, %Q, '%q', %Q, %Q, %Q, %Q, %Q, '%q', %lld);",
+		                   path, pi0, pi1, meta[2], meta[3], meta[4], meta[5], meta[6], meta[7], meta[8],
+				   meta[9], meta[10], meta[11], meta[12], meta[13], meta[14], pi15);
+
+			if( ret == SQLITE_OK )
+			{
+				ret = sqlite3_last_insert_rowid(db);
+				check_for_captions(path, ret);
+			}
+			return ret;
+		}
+		else
+		{
+			return GetVideoMetadata(path, name);
+		}
+	}
+
+}
+
 int64_t
 GetVideoMetadata(const char *path, char *name)
 {
@@ -1559,6 +1638,60 @@ video_no_dlna:
 	{
 		ret = sqlite3_last_insert_rowid(db);
 		check_for_captions(path, ret);
+
+		if ( GETFLAG(CACHE_METADATA_MASK) )
+		{
+			// Create metadata file
+			struct stat file_stat;
+		
+			sprintf(path_dup, "%s", path);
+			char *dir_end = memrchr(path_dup, '/', strlen(path_dup));
+			*dir_end = '\0';
+			DPRINTF(E_DEBUG, L_METADATA, "Dirpath...[%s]\n", path_dup);
+
+			sprintf(meta_path, "%s/.meta/", path_dup);
+			if ( stat(meta_path, &file_stat) != 0 )
+			{
+				if ( mkdir(meta_path, S_IRWXU|S_IRWXG) == 0 )
+				{
+					DPRINTF(E_DEBUG, L_METADATA, "Create metadata path...[%s]\n", meta_path);
+				}
+			}
+			if ( stat(meta_path, &file_stat) != 0 )
+			{
+				DPRINTF(E_WARN, L_METADATA, "Unable to create metadata path...[%s]\n", meta_path);
+			}
+			else
+			{
+				sprintf(path_dup1, "%s", path);
+				sprintf(meta_path, "%s/.meta/%s", path_dup, basename(path_dup1));
+
+				//umask(S_IREAD|S_IWRITE|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+				FILE *metadata_ex_d = fopen(meta_path, "w");
+				if (metadata_ex_d)
+				{
+					sprintf(buf, "%lld\n%ld\n%s\n%s\n%u\n%u\n%u\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%lld\n", (long long)file.st_size,
+						file.st_mtime, m.duration, m.date, m.channels, m.bitrate, m.frequency, m.resolution, m.title,
+						m.creator, m.artist, m.genre, m.comment, m.dlna_pn,
+						m.mime, (long long)album_art);
+
+					size_t towrite = strlen(buf);
+					size_t n = fwrite(&buf, 1, towrite, metadata_ex_d);
+
+					fclose(metadata_ex_d);
+
+					if ( n != towrite )
+					{
+						DPRINTF(E_WARN, L_METADATA, "Unable to fully write metadata file...[%s]\n", meta_path);
+						unlink(meta_path);
+					}
+				}
+				else
+				{
+					DPRINTF(E_WARN, L_METADATA, "Unable to create metadata file...[%s]\n", meta_path);
+				}
+			}
+		}
 	}
 	free_metadata(&m, free_flags);
 	free(path_cpy);

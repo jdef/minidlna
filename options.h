@@ -59,7 +59,8 @@ enum upnpconfigoptions {
 	MAX_CONNECTIONS,		/* maximum number of simultaneous connections */
 	MERGE_MEDIA_DIRS,		/* don't add an extra directory level when there are multiple media dirs */
 	WIDE_LINKS,			/* allow following symlinks outside the defined media_dirs */
-	PASSWORD_LENGTH			/* Password */
+	PASSWORD_LENGTH,		/* Password */
+        ENABLE_CACHE_METADATA		/* cache metadata for video files to avoid expensive recomputation over network file shares */
 };
 
 /* readoptionsfile()
