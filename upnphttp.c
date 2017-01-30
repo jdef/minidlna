@@ -82,6 +82,9 @@
 #include "process.h"
 #include "sendfile.h"
 
+//require libdvdread
+#include <dvdread/ifo_read.h>
+
 #define MAX_BUFFER_SIZE 2147483647
 #define MIN_BUFFER_SIZE 65536
 
@@ -1275,6 +1278,8 @@ send_file(struct upnphttp * h, int sendfd, off_t offset, off_t end_offset)
 	int try_sendfile = 1;
 #endif
 
+	DPRINTF(E_DEBUG, L_HTTP, "offset: %zd, end offset: %zd\n",offset, end_offset);
+
 	while( offset <= end_offset )
 	{
 #if HAVE_SENDFILE
@@ -1321,6 +1326,51 @@ send_file(struct upnphttp * h, int sendfd, off_t offset, off_t end_offset)
 		}
 		offset += ret;
 	}
+	free(buf);
+}
+
+static void
+send_vob_file(struct upnphttp * h, dvd_file_t *vobfd, off_t offset, off_t end_offset, off_t vob_title_offset)
+{
+        int block_size = 0;
+        int send_size = 0;
+        int ret = 0;
+        
+	unsigned char *buf = NULL;
+        
+        DPRINTF(E_DEBUG, L_HTTP, "Range: %zd, %zd\n",offset, end_offset);
+
+	while( offset < end_offset )
+	{
+                                           
+		send_size = ( ((end_offset - offset) < MIN_BUFFER_SIZE) ? (end_offset - offset + 1) : MIN_BUFFER_SIZE);
+                block_size = send_size/DVD_VIDEO_LB_LEN;
+                if (block_size == 0) block_size = 1;
+                send_size = block_size*DVD_VIDEO_LB_LEN;
+                
+		if( !buf ) {
+                    buf = malloc(send_size);
+                }                
+                             
+                int block_offset = offset/DVD_VIDEO_LB_LEN;                                
+                DPRINTF(E_DEBUG, L_HTTP, "Range, offset: %zd, vob_off: %zd, block_off: %d, block size: %d, send size: %d, end_offset: %zd\n",offset, vob_title_offset, block_offset, block_size, send_size, end_offset);                 
+                ret = DVDReadBlocks(vobfd, block_offset+vob_title_offset, block_size, buf); //add offset if multiple titles
+                if (ret <= 0 ) {
+                   DPRINTF(E_WARN, L_HTTP, "Range - read error :: error no. %d [%s]\n", errno, strerror(errno)); 
+                   break;
+                }
+                ret= ret*DVD_VIDEO_LB_LEN;
+                offset+=ret;
+                
+                DPRINTF(E_DEBUG, L_HTTP, "Range, ret: %d\n",ret);                             
+                
+		ret = write(h->socket, buf, ret);
+		if( ret == -1 ) {
+			DPRINTF(E_DEBUG, L_HTTP, "write error :: error no. %d [%s]\n", errno, strerror(errno));
+			if( errno != EAGAIN )
+				break;
+		}		
+     	}
 	free(buf);
 }
 
@@ -1850,7 +1900,7 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 	int rows, ret;
 	off_t total, offset, size;
 	int64_t id;
-	int sendfh;
+	int sendfh = -1;
 	uint32_t dlna_flags = DLNA_FLAG_DLNA_V1_5|DLNA_FLAG_HTTP_STALLING|DLNA_FLAG_TM_B;
 	uint32_t cflags = h->req_client ? h->req_client->type->flags : 0;
 	const char *tmode;
@@ -1864,6 +1914,12 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 #if USE_FORK
 	pid_t newpid = 0;
 #endif
+
+        //dvdread variables
+        dvd_reader_t *dvd = NULL;
+        dvd_file_t* vobfd = NULL;  
+        int send_vob = 0;
+        int vob_offset = 0;
 
 	id = strtoll(object, NULL, 10);
 	if( cflags & FLAG_MS_PFS )
@@ -1939,6 +1995,17 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 		return;
 	}
 #endif
+        //Special handling for ifo files
+        if (ends_with(last_file.path, "VIDEO_TS.IFO") != 0){
+            send_vob = 1;
+        }        
+        
+        //get VOB offset from database
+        if (send_vob == 1) {
+          vob_offset = 0;
+	  vob_offset = sql_get_int_field(db, "SELECT TRACK from DETAILS where ID = '%lld'", id);
+          DPRINTF(E_DEBUG, L_HTTP, "Vob Offset %d\n", vob_offset);
+        }
 
 	DPRINTF(E_INFO, L_HTTP, "Serving DetailID: %lld [%s]\n", (long long)id, last_file.path);
 
@@ -1973,16 +2040,42 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 	}
 
 	offset = h->req_RangeStart;
-	sendfh = _open_file(last_file.path);
-	if( sendfh < 0 ) {
+        
+        if (send_vob == 1){
+          //Warning: case sensitive
+          char *path = replace(last_file.path, "VIDEO_TS.IFO", "");            
+        
+          //open ifo file          
+	  dvd = DVDOpen(path);
+	  if( !dvd ) {
+	    DPRINTF(E_WARN, L_HTTP, "Can't open disc %s!\n", path);
+	    Send404(h);
+	    goto error;
+	  }     
+
+          //Get File Information        
+          vobfd = DVDOpenFile(dvd, 1, DVD_READ_TITLE_VOBS);
+          if (vobfd == 0) {
+            DPRINTF(E_WARN, L_HTTP, "Can't get file infos from Title %i of %s!\n", 1, path);
+            Send404(h);
+	    goto error;
+          }
+          size = DVDFileSize(vobfd)*DVD_VIDEO_LB_LEN;
+          
+          DVDFileSeek(vobfd, 0 );
+        }
+        else {
+	  sendfh = open(last_file.path, O_RDONLY);
+          if( sendfh < 0 ) {
 		if (sendfh == -403)
 			Send403(h);
 		else
 			Send404(h);
 		goto error;
+	  }
+	  size = lseek(sendfh, 0, SEEK_END);
+	  lseek(sendfh, 0, SEEK_SET);
 	}
-	size = lseek(sendfh, 0, SEEK_END);
-	lseek(sendfh, 0, SEEK_SET);
 
 	INIT_STR(str, header);
 
@@ -2008,14 +2101,24 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 		{
 			DPRINTF(E_WARN, L_HTTP, "Specified range was invalid!\n");
 			Send400(h);
-			close(sendfh);
+			if (send_vob == 1) {
+				DVDCloseFile(vobfd);
+				DVDClose(dvd);
+			} else {
+				close(sendfh);
+			}
 			goto error;
 		}
 		if( h->req_RangeEnd >= size )
 		{
 			DPRINTF(E_WARN, L_HTTP, "Specified range was outside file boundaries!\n");
 			Send416(h);
-			close(sendfh);
+			if (send_vob == 1) {
+				DVDCloseFile(vobfd);
+				DVDClose(dvd);
+			} else {
+				close(sendfh);
+			}
 			goto error;
 		}
 
@@ -2059,9 +2162,22 @@ SendResp_dlnafile(struct upnphttp *h, char *object)
 	if( send_data(h, str.data, str.off, MSG_MORE) == 0 )
 	{
 		if( h->req_command != EHead )
-			send_file(h, sendfh, offset, h->req_RangeEnd);
+		{
+			if( send_vob == 1)
+			{
+				send_vob_file(h, vobfd, offset, h->req_RangeEnd, vob_offset);
+			} else {
+				send_file(h, sendfh, offset, h->req_RangeEnd);
+			}
+		}
 	}
-	close(sendfh);
+	if( send_vob == 1 )
+	{
+		DVDCloseFile(vobfd) ;
+		DVDClose(dvd) ;
+	} else {
+		close(sendfh);
+	}
 
 	CloseSocket_upnphttp(h);
 error:

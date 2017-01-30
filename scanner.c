@@ -361,18 +361,19 @@ insert_containers(const char *name, const char *path, const char *refID, const c
 	}
 	else if( strstr(class, "videoItem") )
 	{
-		static long long last_all_objectID = 0;
+		//TODO(jdef) commented out when porting VOB support
+		//static long long last_all_objectID = 0;
 
 		/* All Videos */
-		if( !last_all_objectID )
-		{
-			last_all_objectID = get_next_available_id("OBJECTS", VIDEO_ALL_ID);
-		}
-		sql_exec(db, "INSERT into OBJECTS"
-		             " (OBJECT_ID, PARENT_ID, REF_ID, CLASS, DETAIL_ID, NAME, PASSWORD) "
-		             "VALUES"
-		             " ('"VIDEO_ALL_ID"$%llX', '"VIDEO_ALL_ID"', '%s', '%s', %lld, %Q, '%s')",
-		             last_all_objectID++, refID, class, (long long)detailID, name, password);
+		//if( !last_all_objectID )
+		//{
+		//	last_all_objectID = get_next_available_id("OBJECTS", VIDEO_ALL_ID);
+		//}
+		//sql_exec(db, "INSERT into OBJECTS"
+		//             " (OBJECT_ID, PARENT_ID, REF_ID, CLASS, DETAIL_ID, NAME, PASSWORD) "
+		//             "VALUES"
+		//             " ('"VIDEO_ALL_ID"$%llX', '"VIDEO_ALL_ID"', '%s', '%s', %lld, %Q, '%s')",
+		//             last_all_objectID++, refID, class, (long long)detailID, name, password);
 		return;
 	}
 	else
@@ -464,10 +465,53 @@ insert_file(char *name, const char *path, const char *parentID, int object, medi
 		strcpy(class, "item.imageItem.photo");
 		detailID = GetImageMetadata(path, name);
 	}
+        else if( is_ifo(name))
+	{
+                if (strcmp(name, "VIDEO_TS.IFO") != 0) { //if filename is not VIDEO_TS.IFO discard file
+                        return -1;
+                }
+            
+ 		DPRINTF(E_DEBUG, L_SCANNER, "Analyzing IFO %s!\n", path);
+                orig_name = strdup(name);
+		strcpy(base, VIDEO_ID); //add video directly to "Video"
+		strcpy(class, "item.videoItem");
+		detailID = GetIFOMetadata(path, name, BROWSEDIR_ID, base, class, parentID, object);  
+		if( !detailID )
+			strcpy(name, orig_name);
+                
+                DPRINTF(E_DEBUG, L_SCANNER, "Title %s!\n", path);
+                
+                if( !detailID )
+                {
+                        DPRINTF(E_WARN, L_SCANNER, "Unsuccessful getting details for %s!\n", path);
+                        return -1;
+                }
+                
+                //add Folder to Database. the video has already been added by GetIFOMetadata()
+                sprintf(objectID, "%s%s$%X", BROWSEDIR_ID, parentID, object);
+
+                if( *parentID )
+                {
+                    int typedir_objectID = 0;
+                    typedir_parentID = strdup(parentID);
+                    baseid = strrchr(typedir_parentID, '$');
+                    if( baseid )
+                    {
+                            typedir_objectID = strtol(baseid+1, NULL, 16);
+                            *baseid = '\0';
+                    }
+                    insert_directory(name, path, base, typedir_parentID, typedir_objectID, password);
+                    free(typedir_parentID);
+                }
+                insert_containers(name, path, objectID, class, detailID, password);
+                
+                return 0;
+                
+	}
 	else if( (types & TYPE_VIDEO) && is_video(name) )
 	{
  		orig_name = strdup(name);
-		strcpy(base, VIDEO_DIR_ID);
+		strcpy(base, VIDEO_DIR_ID); // TODO(jdef) original IFO code used VIDEO_ID instead here
 		strcpy(class, "item.videoItem");
 		detailID = GetVideoMetadataLite(path, name);
 		if( !detailID )
@@ -536,7 +580,7 @@ CreateDatabase(void)
 	                  MUSIC_PLIST_ID, MUSIC_ID, _("Playlists"),
 
 	                        VIDEO_ID, "0", _("Video"),
-	                    VIDEO_ALL_ID, VIDEO_ID, _("All Video"),
+	                    //VIDEO_ALL_ID, VIDEO_ID, _("All Video"),	//disabled
 	                    VIDEO_DIR_ID, VIDEO_ID, _("Folders"),
 
 	                        IMAGE_ID, "0", _("Pictures"),
@@ -545,7 +589,7 @@ CreateDatabase(void)
 	                 IMAGE_CAMERA_ID, IMAGE_ID, _("Camera"),
 	                    IMAGE_DIR_ID, IMAGE_ID, _("Folders"),
 
-	                    BROWSEDIR_ID, "0", _("Browse Folders"),
+	                    //BROWSEDIR_ID, "0", _("Browse Folders"),	//disabled
 			0 };
 
 	ret = sql_exec(db, create_objectTable_sqlite);
@@ -654,6 +698,7 @@ filter_av(scan_filter *d)
 		  (is_reg(d) &&
 		   (is_audio(d->d_name) ||
 		    is_video(d->d_name) ||
+		    is_ifo(d->d_name) ||
 	            is_playlist(d->d_name))))
 	       );
 }
@@ -675,8 +720,9 @@ filter_v(scan_filter *d)
 {
 	return ( filter_hidden(d) &&
 	         (filter_type(d) ||
-		  (is_reg(d) &&
-	           is_video(d->d_name)))
+		  (is_reg(d) && (
+	           is_video(d->d_name) ||
+		   is_ifo(d->d_name))))
 	       );
 }
 
@@ -687,6 +733,7 @@ filter_vp(scan_filter *d)
 	         (filter_type(d) ||
 		  (is_reg(d) &&
 		   (is_video(d->d_name) ||
+		    is_ifo(d->d_name) ||
 	            is_image(d->d_name))))
 	       );
 }
@@ -710,6 +757,7 @@ filter_avp(scan_filter *d)
 		   (is_audio(d->d_name) ||
 		    is_image(d->d_name) ||
 		    is_video(d->d_name) ||
+		    is_ifo(d->d_name) ||
 	            is_playlist(d->d_name))))
 	       );
 }
@@ -848,11 +896,55 @@ ScanDirectory(const char *dir, const char *parent, media_types dir_types, const 
 		}
 		if( (type == TYPE_DIR) && (access(full_path, R_OK|X_OK) == 0) )
 		{
-			char *parent_id;
-			insert_directory(name, full_path, BROWSEDIR_ID, THISORNUL(parent), i+startID, password);
-			xasprintf(&parent_id, "%s$%X", THISORNUL(parent), i+startID);
-			ScanDirectory(full_path, parent_id, dir_types, password);
-			free(parent_id);
+                        //Ignore useless BDMV and DVD Directories
+                        if(ends_with(full_path, "AUDIO_TS") != 0 ||
+                           ends_with(full_path, "BDMV/AUXDATA") != 0 ||
+                           ends_with(full_path, "BDMV/BACKUP") != 0 ||
+                           ends_with(full_path, "BDMV/BDJO") != 0 ||
+                           ends_with(full_path, "BDMV/CLIPINF") != 0 ||
+                           ends_with(full_path, "BDMV/JAR") != 0 ||
+                           ends_with(full_path, "BDMV/META") != 0 ||
+                           ends_with(full_path, "BDMV/PLAYLIST") != 0 ||
+                           ends_with(full_path, "CERTIFICATE") != 0) {
+                            
+                           DPRINTF(E_DEBUG, L_SCANNER, "Ignoring directory %s\n", name);                     
+                                                
+                        } else {
+                            int insert = 1;
+			    char *parent_id;
+
+                            //do not add VIDEO_TS, and STREAM folders to folder tree                            
+                            if (strcmp(name, "VIDEO_TS") == 0 || (strcmp(name, "STREAM") == 0 && ends_with(full_path, "BDMV/STREAM") ) ) {       
+			       insert = 0;
+                            }
+                            //ignore BDMV folder if STREAM folder follows
+                            else if (strcmp(name, "BDMV") == 0) {
+                                char* sp = "STREAM";
+                                char* stream_path = malloc(strlen(full_path) + strlen(sp) + 2);
+                                strcpy(stream_path, full_path);
+                                strcat(stream_path, "/");
+                                strcat(stream_path, sp);                                
+
+                                DPRINTF(E_DEBUG, L_SCANNER, "Checking %s\n", stream_path); 
+
+                                struct stat st;
+                                if(stat(stream_path,&st) == 0) {
+                                    //STREAM directory exists -> ignoring BDMV folder
+			            insert = 0;
+                                }                                  
+				free(stream_path);
+                            }
+			    if( insert == 1 ) {
+                                insert_directory(name, full_path, BROWSEDIR_ID, (parent ? parent:""), i+startID, password); 
+				xasprintf(&parent_id, "%s$%X", THISORNUL(parent), i+startID);
+			    } else {
+                                DPRINTF(E_DEBUG, L_SCANNER, "Not adding %s to folder tree\n", name); 
+				xasprintf(&parent_id, "%s", THISORNUL(parent));
+			    }
+			    ScanDirectory(full_path, parent_id, dir_types, password);
+			    free(parent_id);
+                        }
+                        //>
 		}
 		else if( type == TYPE_FILE && (access(full_path, R_OK) == 0) )
 		{
@@ -923,6 +1015,9 @@ start_scanner()
 			id = GetFolderMetadata(bname, media_path->path, NULL, NULL, 0);
 		/* Use TIMESTAMP to store the media type */
 		sql_exec(db, "UPDATE DETAILS set TIMESTAMP = %d where ID = %lld", media_path->types, (long long)id);
+
+		DPRINTF(E_DEBUG, L_SCANNER, "Scan Media Directory %s\n", media_path->path);
+
 		ScanDirectory(media_path->path, parent, media_path->types, "");
 		sql_exec(db, "INSERT into SETTINGS values (%Q, %Q)", "media_dir", media_path->path);
 	}

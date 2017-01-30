@@ -44,6 +44,9 @@
 #include "sql.h"
 #include "log.h"
 
+//require libdvdread
+#include <dvdread/ifo_read.h>
+
 #define FLAG_TITLE	0x00000001
 #define FLAG_ARTIST	0x00000002
 #define FLAG_ALBUM	0x00000004
@@ -68,7 +71,8 @@ enum audio_profiles {
 	PROFILE_AUDIO_PCM,
 	PROFILE_AUDIO_AAC,
 	PROFILE_AUDIO_AAC_MULT5,
-	PROFILE_AUDIO_AMR
+	PROFILE_AUDIO_AMR,
+	PROFILE_AUDIO_DTS
 };
 
 /* This function shamelessly copied from libdlna */
@@ -735,6 +739,62 @@ GetVideoMetadataLite(const char *path, char *name)
 
 }
 
+
+static void
+write_metadata_file(const char *path, struct stat* file, metadata_t *m, int64_t album_art)
+{
+	// Create metadata file
+	struct stat file_stat;
+		
+	sprintf(path_dup, "%s", path);
+	char *dir_end = memrchr(path_dup, '/', strlen(path_dup));
+	*dir_end = '\0';
+	DPRINTF(E_DEBUG, L_METADATA, "Dirpath...[%s]\n", path_dup);
+
+	sprintf(meta_path, "%s/.meta/", path_dup);
+	if ( stat(meta_path, &file_stat) != 0 )
+	{
+		if ( mkdir(meta_path, S_IRWXU|S_IRWXG) == 0 )
+		{
+			DPRINTF(E_DEBUG, L_METADATA, "Create metadata path...[%s]\n", meta_path);
+		}
+	}
+	if ( stat(meta_path, &file_stat) != 0 )
+	{
+		DPRINTF(E_WARN, L_METADATA, "Unable to create metadata path...[%s]\n", meta_path);
+	}
+	else
+	{
+		sprintf(path_dup1, "%s", path);
+		sprintf(meta_path, "%s/.meta/%s", path_dup, basename(path_dup1));
+
+		//umask(S_IREAD|S_IWRITE|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+		FILE *metadata_ex_d = fopen(meta_path, "w");
+		if (metadata_ex_d)
+		{
+			sprintf(buf, "%lld\n%ld\n%s\n%s\n%u\n%u\n%u\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%lld\n", (long long)file->st_size,
+				file->st_mtime, m->duration, m->date, m->channels, m->bitrate, m->frequency, m->resolution, m->title,
+				m->creator, m->artist, m->genre, m->comment, m->dlna_pn,
+				m->mime, (long long)album_art);
+
+			size_t towrite = strlen(buf);
+			size_t n = fwrite(&buf, 1, towrite, metadata_ex_d);
+
+			fclose(metadata_ex_d);
+
+			if ( n != towrite )
+			{
+				DPRINTF(E_WARN, L_METADATA, "Unable to fully write metadata file...[%s]\n", meta_path);
+				unlink(meta_path);
+			}
+		}
+		else
+		{
+			DPRINTF(E_WARN, L_METADATA, "Unable to create metadata file...[%s]\n", meta_path);
+		}
+	}
+}
+
 int64_t
 GetVideoMetadata(const char *path, char *name)
 {
@@ -752,11 +812,12 @@ GetVideoMetadata(const char *path, char *name)
 	metadata_t m;
 	uint32_t free_flags = 0xFFFFFFFF;
 	char *path_cpy, *basepath;
+	int audio_streams = 0;
 
 	memset(&m, '\0', sizeof(m));
 	memset(&video, '\0', sizeof(video));
 
-	//DEBUG DPRINTF(E_DEBUG, L_METADATA, "Parsing video %s...\n", name);
+	DPRINTF(E_DEBUG, L_METADATA, "Parsing video %s...\n", path);
 	if ( stat(path, &file) != 0 )
 		return 0;
 	strip_ext(name);
@@ -773,6 +834,10 @@ GetVideoMetadata(const char *path, char *name)
 	//dump_format(ctx, 0, NULL, 0);
 	for( i=0; i<ctx->nb_streams; i++)
 	{
+		if (ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO)
+		{
+			audio_streams++;
+		}
 		if( ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
 		    audio_stream == -1 )
 		{
@@ -803,6 +868,8 @@ GetVideoMetadata(const char *path, char *name)
 
 	if( ac )
 	{
+		DPRINTF(E_DEBUG, L_METADATA, "Audio Streams: %i\n", audio_streams);
+
 		aac_object_type_t aac_type = AAC_INVALID;
 		switch( ac->codec_id )
 		{
@@ -851,8 +918,10 @@ GetVideoMetadata(const char *path, char *name)
 				}
 				break;
 			case AV_CODEC_ID_AC3:
-			case AV_CODEC_ID_DTS:
 				audio_profile = PROFILE_AUDIO_AC3;
+				break;
+			case AV_CODEC_ID_DTS:
+				audio_profile = PROFILE_AUDIO_DTS;
 				break;
 			case AV_CODEC_ID_WMAV1:
 			case AV_CODEC_ID_WMAV2:
@@ -1616,6 +1685,31 @@ video_no_dlna:
 	if( !m.title )
 		m.title = strdup(name);
 
+        //generate title from path if m2ts-file is located in BDMV/STREAM directory
+        if ((ends_with(path, ".m2ts") != 0) && strstr(path, "/BDMV/STREAM/")) {
+            m.title = strdup(path); //get title from path  
+            strip_ext(m.title); //Remove Extension 
+
+            m.title = replace(m.title, "/BDMV/STREAM/", "#"); //replace BDMV Directory
+
+            char* output;
+            if (getStringBetweenDelimiters(m.title, '/', "#", &output) == 0) //get string from last / until BDMV Directory
+            {
+                 m.title = strdup(output);
+                 free(output);
+            }
+        }
+        m.title = replace(m.title, "/", " - "); //Replace / with -   
+        DPRINTF(E_DEBUG, L_METADATA, "Title: %s!\n", m.title);
+        
+        //if DTS audio detected warn, as this is currently not suppport
+        //and add [DTS] to title
+        if (audio_profile == PROFILE_AUDIO_DTS) {
+           DPRINTF(E_WARN, L_METADATA, "DTS Audio found in : %s\n", path);
+           asprintf(&m.title, "%s [DTS]", m.title);                           
+        }      
+        //>
+
 	album_art = find_album_art(path, m.thumb_data, m.thumb_size);
 	freetags(&video);
 	lav_close(ctx);
@@ -1641,60 +1735,401 @@ video_no_dlna:
 
 		if ( GETFLAG(CACHE_METADATA_MASK) )
 		{
-			// Create metadata file
-			struct stat file_stat;
-		
-			sprintf(path_dup, "%s", path);
-			char *dir_end = memrchr(path_dup, '/', strlen(path_dup));
-			*dir_end = '\0';
-			DPRINTF(E_DEBUG, L_METADATA, "Dirpath...[%s]\n", path_dup);
-
-			sprintf(meta_path, "%s/.meta/", path_dup);
-			if ( stat(meta_path, &file_stat) != 0 )
-			{
-				if ( mkdir(meta_path, S_IRWXU|S_IRWXG) == 0 )
-				{
-					DPRINTF(E_DEBUG, L_METADATA, "Create metadata path...[%s]\n", meta_path);
-				}
-			}
-			if ( stat(meta_path, &file_stat) != 0 )
-			{
-				DPRINTF(E_WARN, L_METADATA, "Unable to create metadata path...[%s]\n", meta_path);
-			}
-			else
-			{
-				sprintf(path_dup1, "%s", path);
-				sprintf(meta_path, "%s/.meta/%s", path_dup, basename(path_dup1));
-
-				//umask(S_IREAD|S_IWRITE|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-				FILE *metadata_ex_d = fopen(meta_path, "w");
-				if (metadata_ex_d)
-				{
-					sprintf(buf, "%lld\n%ld\n%s\n%s\n%u\n%u\n%u\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%lld\n", (long long)file.st_size,
-						file.st_mtime, m.duration, m.date, m.channels, m.bitrate, m.frequency, m.resolution, m.title,
-						m.creator, m.artist, m.genre, m.comment, m.dlna_pn,
-						m.mime, (long long)album_art);
-
-					size_t towrite = strlen(buf);
-					size_t n = fwrite(&buf, 1, towrite, metadata_ex_d);
-
-					fclose(metadata_ex_d);
-
-					if ( n != towrite )
-					{
-						DPRINTF(E_WARN, L_METADATA, "Unable to fully write metadata file...[%s]\n", meta_path);
-						unlink(meta_path);
-					}
-				}
-				else
-				{
-					DPRINTF(E_WARN, L_METADATA, "Unable to create metadata file...[%s]\n", meta_path);
-				}
-			}
+			write_metadata_file(path, &file, &m, album_art);
 		}
 	}
 	free_metadata(&m, free_flags);
 	free(path_cpy);
 
+	return ret;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+/////   following code based on lsdvd.c of lsdvd 0.16
+////    http://sourceforge.net/projects/lsdvd/
+//
+//  Copyright (C) 2003  EFF
+//
+//  This program is free software; you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License version 2 as
+//  published by the Free Software Foundation;
+//
+//  2003	by Chris Phillips
+//  2003-04-19  Cleanups get_title_name, added dvdtime2msec, added helper macros,
+//			  output info structures in form of a Perl module, by Henk Vergonet.
+//
+///////////////////////////////////////////////////////////////////////////////
+
+double frames_per_s[4] = {-1.0, 25.00, -1.0, 29.97};
+char *video_format[2] = {"NTSC", "PAL"};
+char *aspect_ratio[4] = {"4/3", "16/9", "\"?:?\"", "16/9"};
+int video_height[4] = {480, 576, 0, 576};
+int video_width[4]  = {720, 704, 352, 352};
+char *mpeg_version[2] = {"mpeg1", "mpeg2"};
+char *audio_format[7] = {"ac3", "?", "mpeg1", "mpeg2", "lpcm ", "sdds ", "dts"};
+int sample_freq[2]  = {48000, 48000};
+
+int dvdtime2msec(dvd_time_t *dt)
+{
+	double fps = frames_per_s[(dt->frame_u & 0xc0) >> 6];
+	long   ms;
+	ms  = (((dt->hour &   0xf0) >> 3) * 5 + (dt->hour   & 0x0f)) * 3600000;
+	ms += (((dt->minute & 0xf0) >> 3) * 5 + (dt->minute & 0x0f)) * 60000;
+	ms += (((dt->second & 0xf0) >> 3) * 5 + (dt->second & 0x0f)) * 1000;
+
+	if(fps > 0)
+	ms += ((dt->frame_u & 0x30) >> 3) * 5 + (dt->frame_u & 0x0f) * 1000.0 / fps;
+
+	return ms;
+}
+
+int64_t
+GetIFOMetadata(const char *path, char *name, char *browse_dir_id, const char* base, const char *class, const char *parentID, int object)
+{
+	struct stat file;
+	int ret = 0, i;
+	struct tm *modtime;
+	enum audio_profiles audio_profile = PROFILE_AUDIO_UNKNOWN;
+	int64_t album_art = 0;
+	//struct song_metadata video;
+        
+	uint32_t free_flags = 0xFFFFFFFF;
+        
+        int audio_streams = 0;    
+
+	//memset(&video, '\0', sizeof(video));
+        
+        //dvdread variables
+        dvd_reader_t *dvd;
+        ifo_handle_t *ifo_info, **ifo;
+        pgcit_t *vts_pgcit;
+	vtsi_mat_t *vtsi_mat;
+	audio_attr_t *audio_attr;
+	video_attr_t *video_attr;
+        pgc_t *pgc;
+	int j, titles, vts_ttn, title_set_nr;   
+        int chapters = 0;
+        int start_sector = 0;
+     
+
+	DPRINTF(E_DEBUG, L_METADATA, "Parsing %s...\n", path);
+	if ( stat(path, &file) != 0 )
+		return 0;
+	strip_ext(name);
+
+        //Remove VIDEO_TS.IFO filename from path, as libdvread expects a folder, Warning: replace is case sensitive
+        char *real_path = replace(path, "VIDEO_TS.IFO", "");            
+        
+        //open dvd folder
+	dvd = DVDOpen(real_path);
+	if( !dvd ) {
+		DPRINTF(E_WARN, L_METADATA, "Can't open disc %s!\n", path);
+		return 0;
+	}        
+        
+        //open main ifo file
+	DPRINTF(E_DEBUG, L_METADATA, "Accessing main ifo %s...\n", path);
+        ifo_info = ifoOpen(dvd, 0);
+	if ( !ifo_info ) {
+                DPRINTF(E_WARN, L_METADATA, "Can't open main ifo %s!\n", path);
+                DVDClose(dvd);
+		return 0;
+	}
+        
+	ifo = (ifo_handle_t **)malloc((ifo_info->vts_atrt->nr_of_vtss + 1) * sizeof(ifo_handle_t *));
+
+        //open IFO files
+	for (i=1; i <= ifo_info->vts_atrt->nr_of_vtss; i++) {
+		DPRINTF(E_DEBUG, L_METADATA, "Accessing ifo %d of %s...\n", i, path);
+                ifo[i] = ifoOpen(dvd, i);
+		if ( !ifo[i] ) {
+                        DPRINTF(E_WARN, L_METADATA, "Can't open ifo nr %d of %s!\n", i, path);
+                        
+                        //cleanup
+                        int x = 1;
+                        for (x=1; x <= i; x++) { 
+                            ifoClose(ifo[x]);	
+                        }                        
+                        ifoClose(ifo_info);
+                        DVDClose(dvd);
+                        
+			return 0;
+		}
+	}
+	titles = ifo_info->tt_srpt->nr_of_srpts;        
+
+        //Analyze Titles
+        if (titles == 0) {
+           DPRINTF(E_WARN, L_METADATA, "No titles found in ifo!\n");
+           
+           //cleanup
+           for (i=1; i <= ifo_info->vts_atrt->nr_of_vtss; i++) { ifoClose(ifo[i]);}
+           ifoClose(ifo_info);
+           DVDClose(dvd);
+           return 0;
+        }
+                
+        DPRINTF(E_DEBUG, L_METADATA, "VTS Titles : %d\n", titles);                        
+        j = 0;
+          
+        //Get File Information 
+	DPRINTF(E_DEBUG, L_METADATA, "Reading VOB for ifo %d of %s...\n", i, path);
+        dvd_file_t* vobs_file = NULL;          
+        vobs_file = DVDOpenFile(dvd, 1, DVD_READ_TITLE_VOBS);
+        if (vobs_file == 0) {
+            DPRINTF(E_WARN, L_METADATA, "Can't get file infos from Title %i of %s!\n", j, path);
+            
+            //cleanup
+            DVDCloseFile(vobs_file);
+            for (i=1; i <= ifo_info->vts_atrt->nr_of_vtss; i++) { ifoClose(ifo[i]);}
+            ifoClose(ifo_info);
+            DVDClose(dvd);
+            return 0;
+        }
+        long vob_size = DVDFileSize(vobs_file)*DVD_VIDEO_LB_LEN;
+        DVDCloseFile(vobs_file);
+          
+        DPRINTF(E_DEBUG, L_METADATA, "Size of Title %i: %ld bytes\n", j + 1, vob_size );        
+          
+        //Analyze Titles
+        for (j=0; j < titles; j++) {
+            if (ifo[ifo_info->tt_srpt->title[j].title_set_nr]->vtsi_mat) {
+                DPRINTF(E_DEBUG, L_METADATA, "Analyzing Title %i\n", j+1);                   
+                
+                //Varabiles for metadata
+                metadata_t m;
+        	memset(&m, '\0', sizeof(m));  
+                
+                //Get Format
+		vtsi_mat     = ifo[ifo_info->tt_srpt->title[j].title_set_nr]->vtsi_mat;
+		vts_pgcit    = ifo[ifo_info->tt_srpt->title[j].title_set_nr]->vts_pgcit;
+		vts_ttn      = ifo_info->tt_srpt->title[j].vts_ttn;
+		title_set_nr = ifo_info->tt_srpt->title[j].title_set_nr;
+                pgc          = vts_pgcit->pgci_srp[ifo[title_set_nr]->vts_ptt_srpt->title[vts_ttn - 1].ptt[0].pgcn - 1].pgc;
+		video_attr   = &vtsi_mat->vts_video_attr;                
+                
+                //Get Chapters               
+                chapters     = ifo_info->tt_srpt->title[j].nr_of_ptts;                
+                int start_cell = pgc->program_map[0];
+                int end_cell   = pgc->nr_of_cells;
+                
+                start_sector = pgc->cell_playback[start_cell - 1].first_sector;
+                int end_sector   = pgc->cell_playback[end_cell - 1].last_sector;
+                
+                DPRINTF(E_DEBUG, L_METADATA, "Chapters: %i, Cells: %i, Start Sector: %i, End Sector: %i\n", chapters, end_cell, start_sector, end_sector);
+                
+                if (titles > 1) {
+                    //calculate file size from cell sizes
+                    vob_size = (end_sector-start_sector)*DVD_VIDEO_LB_LEN;
+                    DPRINTF(E_DEBUG, L_METADATA, "Size of Chapters of Title %i : %ld\n",j+1, vob_size);
+                }
+                                
+                int fps = frames_per_s[(pgc->playback_time.frame_u & 0xc0) >> 6];
+		char *aspect = aspect_ratio[video_attr->display_aspect_ratio];
+                int width = video_width[video_attr->picture_size];
+                int height = video_height[video_attr->video_format];                                
+                xasprintf(&m.resolution, "%dx%d", width, height);
+                //DPRINTF(E_DEBUG, L_METADATA, "VTS[%d] %d x %d\n", title_set_nr, width, height);                
+                
+                float length = dvdtime2msec(&pgc->playback_time)/1000.0;
+                if( length > 0 ) {
+                        int duration, hours, min, sec, ms;
+			duration = (int)(length);
+			hours = (int)(duration / 3600);
+			min = (int)(duration / 60 % 60);
+			sec = (int)(duration % 60);
+			ms = (int)(duration % 1000); //Warning: not accurate
+			xasprintf(&m.duration, "%d:%02d:%02d.%03d", hours, min, sec, ms);
+		}   
+                   
+                //Set Video Format to MPEG2
+                //we asume MPEG1=MPEG2
+		xasprintf(&m.mime, "video/mpeg");   
+                
+		m.dlna_pn = malloc(64);
+                int off;                
+                off = sprintf(m.dlna_pn, "MPEG_");				
+		off += sprintf(m.dlna_pn+off, "PS_");                
+                
+		if(strcmp(video_format[video_attr->video_format],"PAL") == 0)
+		    off += sprintf(m.dlna_pn+off, "PAL");
+		else
+		    off += sprintf(m.dlna_pn+off, "NTSC");              
+                
+                DPRINTF(E_DEBUG, L_METADATA, "Title [%d] VTS[%d] Video, Length: %s, Format: %s, fps: %i, aspect %s, Resolution: %s\n", j+1, title_set_nr, m.duration, m.dlna_pn, fps, aspect, m.resolution);                
+                
+                //Audio
+                audio_streams = vtsi_mat->nr_of_vts_audio_streams;                                              
+                DPRINTF(E_DEBUG, L_METADATA, "Title [%d] VTS[%d] Audio Streams: %i\n", j+1, title_set_nr, audio_streams );
+                
+                if (audio_streams > 0) {                                    
+                    //TODO: support for multiple audio streams
+                    i = 0;
+                 
+                    audio_attr = &vtsi_mat->vts_audio_attr[i];
+		    int frequency = sample_freq[audio_attr->sample_frequency];
+		    int channels = audio_attr->channels+1;
+                    char *a_format = audio_format[audio_attr->audio_format];                          
+                                     
+		    if (strcmp(a_format, "ac3") == 0) {
+                       audio_profile = PROFILE_AUDIO_AC3;
+                       a_format = "AC3";
+                    }
+                    else if (strcmp(a_format, "dts") == 0) { 
+		       audio_profile = PROFILE_AUDIO_DTS;                                
+                       a_format = "DTS";
+                    }
+                    else if (strcmp(a_format, "mpeg1") == 0) { 
+                       audio_profile = PROFILE_AUDIO_MP2;
+                       a_format = "MP2";
+                       DPRINTF(E_INFO, L_METADATA, "Detected audio format MPEG1 detected, handling as MPEG2\n");                      
+                    }
+                    else if (strcmp(a_format, "mpeg2") == 0) { 
+                       audio_profile = PROFILE_AUDIO_MP2;
+                       a_format = "MP2";
+                    }
+                    else if (strcmp(a_format, "lpcm") == 0) { 
+ 		       audio_profile = PROFILE_AUDIO_PCM;
+                       a_format = "PCM";
+                    }
+                    else {
+        	       DPRINTF(E_WARN, L_METADATA, "Unhandled audio format [0x%X], ignoring title %d\n", audio_attr->audio_format, j+1);     
+                       free_metadata(&m, free_flags);                     
+                       continue;
+		    }
+		    m.channels = channels;
+		    m.frequency = frequency;
+                  
+                    DPRINTF(E_DEBUG, L_METADATA, "Title [%d] VTS[%d] Audio [%i]: Format: %s, Channels: %i, Frequency: %i\n", j+1, title_set_nr, i, a_format, channels, frequency);
+		
+                } else {
+                    DPRINTF(E_WARN, L_METADATA, "Ignoring title %d without audio in %s\n", j+1, path);                
+                    free_metadata(&m, free_flags);                     
+                    continue;
+                }     
+            
+                //Add Video to Database
+                if( !m.date ) {
+		    m.date = malloc(20);
+		    modtime = localtime(&file.st_mtime);
+		    strftime(m.date, 20, "%FT%T", modtime);
+	        }
+            
+                if( !m.title ) m.title = strdup(name);         
+                
+                //generate vob title from path                  
+                m.title = strdup(path);                             //get title from path  
+                strip_ext(m.title);                                 //Remove Extension 
+                    
+                if (strstr(m.title, "/VIDEO_TS/")) {
+                    m.title = replace(m.title, "/VIDEO_TS/", "#");   //replace VIDEO_TS Directory
+
+                    char* output;                    
+                    if(getStringBetweenDelimiters(m.title, '/', "#", &output) == 0) //get string from last / until VIDEO_TS Directory
+                    {
+                      m.title = strdup(output);
+                      free(output);
+                    }
+                }
+                m.title = replace(m.title, "/", " - ");          //Replace / with -                                      
+                
+                //if more than 1 titles append VTS id if not the only title
+                if (titles > 1 ) {                
+                     xasprintf(&m.title, "%s - %i", m.title, j+1);                    
+                }                
+                        
+                //if DTS audio detected warn, as this is currently not suppport
+                //and add [DTS] to title
+                if (audio_profile == PROFILE_AUDIO_DTS) {
+                     DPRINTF(E_WARN, L_METADATA, "DTS Audio found in : %s\n", path);
+                     asprintf(&m.title, "%s [DTS]", m.title);                           
+                }           
+        
+                DPRINTF(E_DEBUG, L_METADATA, "Title: %s!\n", m.title);
+
+/* */
+                //album_art = find_album_art(path, video.image, video.image_size);
+                album_art = find_album_art(path, NULL, 0);
+                //freetags(&video);
+                
+		//TODO(jdef) support metadata cache file (like we do for video)?
+                //hint: Save VOB title start sector in column TRACK
+                DPRINTF(E_DEBUG, L_METADATA, "Save VOB Title %i start sector\n", j+1);                   
+                ret = sql_exec(db, "INSERT into DETAILS"
+                                   " (PATH, SIZE, TIMESTAMP, DURATION, DATE, CHANNELS, BITRATE, SAMPLERATE, RESOLUTION,"
+                                   "  TITLE, CREATOR, ARTIST, GENRE, COMMENT, DLNA_PN, MIME, ALBUM_ART, TRACK) " 
+                                   "VALUES"
+                                   " (%Q, %ld, %lld, '%s', %Q, %d, %d, %d, %Q, '%q', %Q, %Q, %Q, %Q, %Q, '%q', %lld, %d);",
+                                   path, vob_size, (long long)file.st_mtime, m.duration,
+                                   m.date, m.channels, m.bitrate, m.frequency, m.resolution,
+                                   m.title, m.creator, m.artist, m.genre, m.comment, m.dlna_pn,
+                                   m.mime, album_art, start_sector);
+                if( ret != SQLITE_OK ) {
+                        DPRINTF(E_WARN, L_METADATA, "Error inserting details for '%s'!\n", path);
+                        ret = 0;
+                        
+                	free_metadata(&m, free_flags);                     
+                        continue;
+                }
+                else {
+                	DPRINTF(E_DEBUG, L_METADATA, "Checking Title %i for captions\n", j+1);                   
+                        ret = sqlite3_last_insert_rowid(db);
+                        check_for_captions(path, ret);
+                }
+                
+                //add title as object to database
+                DPRINTF(E_DEBUG, L_METADATA, "Add Title %i as object to database\n", j+1);                   
+                char objectID[64];
+                sprintf(objectID, "%s%s$%X", browse_dir_id, parentID, object + j);
+
+                //DPRINTF(E_DEBUG, L_METADATA, "inserting details for id '%i'!\n", ret);
+
+                //insert
+                //DPRINTF(E_DEBUG, L_METADATA, "INSERT into OBJECTS"
+                //" (OBJECT_ID, PARENT_ID, CLASS, DETAIL_ID, NAME) "
+                //"VALUES"
+                //" ('%s', '%s%s', '%s', %lld, '%s')\n",
+                //objectID, browse_dir_id, parentID, class, ret, m.title);
+
+                int r1 = sql_exec(db, "INSERT into OBJECTS"
+                        " (OBJECT_ID, PARENT_ID, CLASS, DETAIL_ID, NAME) "
+                        "VALUES"
+                        " ('%s', '%s%s', '%s', %i, '%q')",
+                        objectID, browse_dir_id, parentID, class, ret, m.title);
+                
+                if (r1 != SQLITE_OK) {
+                    DPRINTF(E_WARN, L_METADATA, "Error inserting details for '%s'!\n", path);
+                }
+
+                //DPRINTF(E_DEBUG, L_METADATA, "INSERT into OBJECTS"
+                //" (OBJECT_ID, PARENT_ID, REF_ID, CLASS, DETAIL_ID, NAME) "
+                //"VALUES"
+                //" ('%s%s$%X', '%s%s', '%s', '%s', %i, '%s')\n",
+                //base, parentID, object+j, base, parentID, objectID, class, ret, name);
+
+                DPRINTF(E_DEBUG, L_METADATA, "Add(2) Title %i as object to database\n", j+1);                   
+                int r2 = sql_exec(db, "INSERT into OBJECTS"
+                        " (OBJECT_ID, PARENT_ID, REF_ID, CLASS, DETAIL_ID, NAME) "
+                        "VALUES"
+                        " ('%s%s$%X', '%s%s', '%s', '%s', %i, '%q')",
+                        base, parentID, object + j, base, parentID, objectID, class, ret, name);
+
+                if (r2 != SQLITE_OK) {
+                    DPRINTF(E_WARN, L_METADATA, "Error inserting details for '%s'!\n", path);
+                }                       
+/* */
+            
+                //free metadata
+                free_metadata(&m, free_flags);                     
+                DPRINTF(E_DEBUG, L_METADATA, "Finished analyzing Title %i\n", j+1);                   
+            }
+        } 
+        
+        //cleanup
+        for (i=1; i <= ifo_info->vts_atrt->nr_of_vtss; i++) { ifoClose(ifo[i]);}
+        ifoClose(ifo_info);
+	DVDClose(dvd);
+ 
 	return ret;
 }

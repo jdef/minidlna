@@ -83,6 +83,7 @@ char *unescape_tag(const char *tag, int force_alloc);
 char *strip_ext(char *name);
 
 /* Metadata functions */
+int is_ifo(const char * file);
 int is_video(const char * file);
 int is_audio(const char * file);
 int is_image(const char * file);
@@ -95,5 +96,8 @@ const char *mime_to_ext(const char * mime);
 /* Others */
 int make_dir(char * path, mode_t mode);
 unsigned int DJBHash(uint8_t *data, int len);
+
+char * replace(char const * const original, char const * const pattern, char const * const replacement);
+int getStringBetweenDelimiters(const char* string, char leftDelimiter, const char* rightDelimiter, char** out);
 
 #endif

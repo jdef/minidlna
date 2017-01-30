@@ -478,6 +478,16 @@ AC_CHECK_LIB(vorbisfile, vorbis_comment_query,
         AM_CONDITIONAL(NEED_VORBIS, true),
         -logg)
 
+# test if libdvdread is available
+# needed for ifo support
+AC_CHECK_LIB(dvdread, DVDOpen, , AC_MSG_ERROR([libdvdread not found!]))
+AC_MSG_CHECKING([for dvdread/ifo_read.h])
+AC_TRY_COMPILE([#include <dvdread/ifo_read.h>
+		#include <stdint.h>], ,
+	AC_MSG_RESULT([yes]), 
+	AC_MSG_RESULT([no]) 
+	AC_MSG_ERROR([Header files for dvdread not found]))
+
 ################################################################################################################
 ### Header checks
 

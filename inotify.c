@@ -318,6 +318,7 @@ inotify_insert_file(char * name, const char * path)
 			if( !is_image(path) &&
 			    !is_audio(path) &&
 			    !is_video(path) &&
+			    !is_ifo(path) &&
 			    !is_playlist(path) )
 				return -1;
 			break;
@@ -329,6 +330,7 @@ inotify_insert_file(char * name, const char * path)
 		case TYPE_AUDIO|TYPE_VIDEO:
 			if( !is_audio(path) &&
 			    !is_video(path) &&
+			    !is_ifo(path) &&
 			    !is_playlist(path) )
 				return -1;
 			break;
@@ -339,12 +341,14 @@ inotify_insert_file(char * name, const char * path)
 				return -1;
 			break;
 		case TYPE_VIDEO:
-			if( !is_video(path) )
+			if( !is_video(path) &&
+			    !is_ifo(path) )
 				return -1;
 			break;
 		case TYPE_VIDEO|TYPE_IMAGES:
 			if( !is_image(path) &&
-			    !is_video(path) )
+			    !is_video(path) &&
+			    !is_ifo(path) )
 				return -1;
 			break;
 		case TYPE_IMAGES:

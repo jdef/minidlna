@@ -29,6 +29,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stddef.h>
 
 #include "minidlnatypes.h"
 #include "upnpglobalvars.h"
@@ -359,6 +360,10 @@ mime_to_ext(const char * mime)
 				return "3gp";
 			else if( strncmp(mime+6, "x-tivo-mpeg", 11) == 0 )
 				return "TiVo";
+			else if( strcmp(mime+6, "vdr") == 0 )
+				return "mpg";
+                        else if( strcmp(mime+6, "ifo") == 0 ) //report ifo as ifo
+				return "ifo";
 			break;
 		case 'i':
 			if( strcmp(mime+6, "jpeg") == 0 )
@@ -373,6 +378,13 @@ mime_to_ext(const char * mime)
 }
 
 int
+is_ifo(const char * file)
+{
+        //DPRINTF(E_DEBUG, L_SCANNER, "is_ifo %s %i\n", file, ends_with(file, ".ifo"));  
+	return (ends_with(file, ".ifo"));
+}
+
+int
 is_video(const char * file)
 {
 	return (ends_with(file, ".mpg") || ends_with(file, ".mpeg")  ||
@@ -381,11 +393,14 @@ is_video(const char * file)
 		ends_with(file, ".mp4") || ends_with(file, ".m4v")   ||
 		ends_with(file, ".mts") || ends_with(file, ".m2ts")  ||
 		ends_with(file, ".m2t") || ends_with(file, ".mkv")   ||
-		ends_with(file, ".vob") || ends_with(file, ".ts")    ||
+		//ends_with(file, ".vob") ||
+		ends_with(file, "VIDEO_TS.IFO")    ||
+		ends_with(file, ".ts")    ||
 		ends_with(file, ".flv") || ends_with(file, ".xvid")  ||
 #ifdef TIVO_SUPPORT
 		ends_with(file, ".TiVo") ||
 #endif
+		ends_with(file, ".vdr")    ||
 		ends_with(file, ".mov") || ends_with(file, ".3gp"));
 }
 
@@ -503,3 +518,71 @@ resolve_unknown_type(const char * path, media_types dir_type)
 	return type;
 }
 
+//Source: http://stackoverflow.com/questions/779875/what-is-the-function-to-replace-string-in-c
+char * replace(char const * const original, char const * const pattern, char const * const replacement) {
+  size_t const replen = strlen(replacement);
+  size_t const patlen = strlen(pattern);
+  size_t const orilen = strlen(original);
+
+  size_t patcnt = 0;
+  const char * oriptr;
+  const char * patloc;
+
+  // find how many times the pattern occurs in the original string
+  for (oriptr = original; (patloc = strstr(oriptr, pattern)); oriptr = patloc + patlen)
+  {
+    patcnt++;
+  }
+
+  {
+    // allocate memory for the new string
+    size_t const retlen = orilen + patcnt * (replen - patlen);
+    char * const returned = (char *) malloc( sizeof(char) * (retlen + 1) );
+
+    if (returned != NULL)
+    {
+      // copy the original string,
+      // replacing all the instances of the pattern
+      char * retptr = returned;
+      for (oriptr = original; (patloc = strstr(oriptr, pattern)); oriptr = patloc + patlen)
+      {
+        size_t const skplen = patloc - oriptr;
+        // copy the section until the occurence of the pattern
+        strncpy(retptr, oriptr, skplen);
+        retptr += skplen;
+        // copy the replacement
+        strncpy(retptr, replacement, replen);
+        retptr += replen;
+      }
+      // copy the rest of the string.
+      strcpy(retptr, oriptr);
+    }
+    return returned;
+  }
+}
+
+//Source: http://stackoverflow.com/questions/2708719/string-parsing-and-substring-in-c
+int getStringBetweenDelimiters(const char* string, char leftDelimiter, const char* rightDelimiter, char** out)
+{
+    // find the left delimiter and use it as the beginning of the substring
+    const char* beginning = strrchr(string, leftDelimiter);
+    if(beginning == NULL)
+        return 1; // left delimiter not found
+
+    // find the right delimiter
+    const char* end = strstr(string, rightDelimiter);
+    if(end == NULL)
+        return 2; // right delimiter not found
+
+    // offset the beginning by the length of the left delimiter, so beginning points _after_ the left delimiter
+    beginning += 1;
+
+    // get the length of the substring
+    ptrdiff_t segmentLength = end - beginning;
+
+    // allocate memory and copy the substring there
+    *out = malloc(segmentLength + 1);
+    strncpy(*out, beginning, segmentLength);
+    (*out)[segmentLength] = 0;
+    return 0; // success!
+}

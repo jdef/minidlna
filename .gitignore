@@ -38,4 +38,5 @@ po/stamp-po
 stamp-h1
 .deps/
 *.o
+*.in~
 .dirstamp

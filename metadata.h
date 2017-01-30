@@ -103,4 +103,7 @@ GetVideoMetadata(const char *path, char *name);
 int64_t
 GetVideoMetadataLite(const char *path, char *name);
 
+int64_t
+GetIFOMetadata(const char *path, char *name, char *browse_dir_id, const char* base, const char *class, const char *parentID, int object);
+
 #endif
